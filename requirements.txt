@@ -1,0 +1,16 @@
+# This file documents the dependencies for this project
+#
+# To install:
+# 1. First install numba from binary: pip install --only-binary :all: numba
+# 2. Install AccelForge: pip install -e ../accelforge
+# 3. Install Jupyter: pip install -r requirements.txt
+
+jupyter>=1.0.0
+ipykernel>=7.0.0
+jupyterlab>=4.0.0
+notebook>=7.0.0
+
+# Additional packages you might want for your project
+# matplotlib>=3.10.0  # Already installed via AccelForge
+# numpy>=2.2.0        # Already installed via AccelForge
+# pandas>=2.2.0       # Already installed via AccelForge
