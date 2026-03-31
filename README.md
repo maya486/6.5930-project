@@ -5,50 +5,71 @@ This repository contains notebooks, experiments, and documentation for the 6.593
 ## Setup Instructions
 
 ### Prerequisites
-- Python 3.12 or higher
+- Python 3.8 or higher (Python 3.12 recommended)
 - Git
 
-### Installation
+### Quick Setup (Recommended)
 
-1. Clone this repository:
+1. Clone both repositories:
 ```bash
+# Clone the project repo
 git clone https://github.com/maya486/6.5930-project.git
-cd 6.5930-project
-```
 
-2. Clone the AccelForge fork:
-```bash
-cd ..
+# Clone the AccelForge fork
 git clone https://github.com/maya486/accelforge.git
 ```
 
-3. Create and activate a virtual environment:
-```bash
-python3.12 -m venv accelforge_env
-source accelforge_env/bin/activate  # On Unix/macOS
-# OR
-accelforge_env\Scripts\activate  # On Windows
+Your directory structure should look like:
+```
+parent-directory/
+├── 6.5930-project/    (this repo)
+└── accelforge/        (forked AccelForge)
 ```
 
-4. Install AccelForge in editable mode:
+2. Run the setup script:
 ```bash
+cd 6.5930-project
+./setup.sh
+```
+
+This will automatically:
+- Create a virtual environment at `../accelforge_env`
+- Install all dependencies
+- Install AccelForge in editable mode
+- Install Jupyter
+
+3. Start Jupyter:
+```bash
+./start_jupyter.sh
+```
+
+### Manual Setup
+
+If you prefer to set up manually or the script doesn't work:
+
+1. Clone both repositories (as above)
+
+2. Create and activate a virtual environment:
+```bash
+cd 6.5930-project
+python3 -m venv ../accelforge_env
+source ../accelforge_env/bin/activate  # On Unix/macOS
+# OR
+..\accelforge_env\Scripts\activate  # On Windows
+```
+
+3. Install dependencies:
+```bash
+pip install --upgrade pip
 pip install --only-binary :all: numba  # Install numba from binary first
 pip install -e ../accelforge
+pip install -r requirements.txt
 ```
 
-5. Install Jupyter:
-```bash
-pip install jupyter ipykernel
-```
-
-### Running Jupyter
-
-From the project directory:
+4. Start Jupyter:
 ```bash
 source ../accelforge_env/bin/activate  # Activate environment
 jupyter notebook
-# OR
-jupyter lab
 ```
 
 ## Project Structure
