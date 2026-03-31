@@ -10,6 +10,10 @@ ipykernel>=7.0.0
 jupyterlab>=4.0.0
 notebook>=7.0.0
 
+# PyTorch for parsing computational graphs
+torch>=2.0.0
+torchvision>=0.15.0
+
 # Additional packages you might want for your project
 # matplotlib>=3.10.0  # Already installed via AccelForge
 # numpy>=2.2.0        # Already installed via AccelForge
