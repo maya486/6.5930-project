@@ -1,0 +1,208 @@
+# Mapping of GPT-3 workload operations to TPU v4i architecture
+#
+# This mapping defines how each einsum operation from gpt3_175B.yaml
+# is scheduled onto the TPU v4i hardware (tpu_v4i.yaml)
+#
+# Reference: https://github.com/Accelergy-Project/accelforge/blob/main/examples/mappings/fused_matmuls_to_simple.yaml
+
+mapping:
+  # Global constraints that apply to all operations
+  global:
+    # Target architecture nodes
+    target:
+      - GlobalBuffer
+      - LocalBuffer
+      - MAC
+
+    # Spatial mapping: Use all 4 spatial tiles (Z dimension)
+    spatial:
+      Z: 4  # 4 spatial tiles in TPU v4i
+
+  # Per-einsum mappings
+  einsums:
+    # Operation 1: I[b, m, d] = I_in[b, m, d] (copy)
+    - name: "I[b, m, d] = I_in[b, m, d]"
+      mapping:
+        target: GlobalBuffer
+        # Just a copy, no MAC needed
+        # Can be distributed across spatial tiles
+        tile:
+          M: 4  # Split tokens across 4 tiles (8192/4 = 2048 per tile)
+
+    # Operation 2: V[b, m, h, e] = I[b, m, d] * WV[h, e, d]
+    - name: "V[b, m, h, e] = I1[b, m, d] * WV[h, e, d]"
+      mapping:
+        target:
+          - LocalBuffer  # Cache WV weights locally
+          - MAC
+        spatial:
+          Z: 4          # Use all 4 spatial tiles
+          H: 24         # Split 96 heads across tiles (24 heads per tile)
+        temporal:
+          M: 2048       # Process 2048 tokens per tile
+          E: 128        # Full embedding dim
+          D: 12288      # Full input dim
+
+    # Operation 3: K[b, m, h, e] = I[b, m, d] * WK[h, e, d]
+    - name: "K[b, m, h, e] = I1[b, m, d] * WK[h, e, d]"
+      mapping:
+        target:
+          - LocalBuffer
+          - MAC
+        spatial:
+          Z: 4
+          H: 24
+        temporal:
+          M: 2048
+          E: 128
+          D: 12288
+
+    # Operation 4: Q[b, m, h, e] = I[b, m, d] * WQ[h, e, d]
+    - name: "Q[b, m, h, e] = I1[b, m, d] * WQ[h, e, d]"
+      mapping:
+        target:
+          - LocalBuffer
+          - MAC
+        spatial:
+          Z: 4
+          H: 24
+        temporal:
+          M: 2048
+          E: 128
+          D: 12288
+
+    # Operation 5: QK[b, m, p, h] = Q[b, m, h, e] * K[b, p, h, e]
+    - name: "QK[b, m, p, h] = Q1[b, m, h, e] * K1[b, M: p, h, e]"
+      mapping:
+        target:
+          - LocalBuffer  # Cache K in local buffer
+          - MAC
+        spatial:
+          Z: 4
+          H: 24         # 24 heads per tile
+        temporal:
+          M: 512        # Process tokens in chunks (memory intensive)
+          P: 512
+          E: 128
+
+    # Operation 6: QK_softmax[b, m, p, h] = QK[b, m, p, h]
+    - name: "QK_softmax[b, m, p, h] = QK1[b, m, p, h]"
+      mapping:
+        target:
+          - LocalBuffer
+          - MAC  # Softmax uses MAC for exp/div
+        spatial:
+          Z: 4
+          H: 24
+        temporal:
+          M: 2048
+          P: 2048
+
+    # Operation 7: AV[b, m, h, f] = QK_softmax * V
+    - name: "AV[b, m, h, f] = QK_softmax1[b, m, p, h] * V1[b, M: p, h, E: f]"
+      mapping:
+        target:
+          - LocalBuffer  # Cache V in local buffer
+          - MAC
+        spatial:
+          Z: 4
+          H: 24
+        temporal:
+          M: 512
+          P: 512
+          F: 128
+
+    # Operation 8: Z[b, m, g] = AV * WZ
+    - name: "Z[b, m, g] = AV1[b, m, h, f] * WZ[h, f, g]"
+      mapping:
+        target:
+          - LocalBuffer  # Cache WZ weights
+          - MAC
+        spatial:
+          Z: 4
+          H: 24
+        temporal:
+          M: 2048
+          F: 128
+          G: 12288
+
+    # Operation 9: FFA[b, m, c] = Z * WFFA
+    - name: "FFA[b, m, c] = Z1[b, m, g] * WFFA[g, c]"
+      mapping:
+        target:
+          - LocalBuffer  # Cache WFFA weights
+          - MAC
+        spatial:
+          Z: 4
+          M: 2048       # Split tokens spatially
+        temporal:
+          G: 12288
+          C: 49152      # Large FFN dimension
+
+    # Operation 10: FFB[b, m, j] = FFA * WFFB
+    - name: "FFB[b, m, j] = FFA1[b, m, c] * WFFB[c, j]"
+      mapping:
+        target:
+          - LocalBuffer  # Cache WFFB weights
+          - MAC
+        spatial:
+          Z: 4
+          M: 2048
+        temporal:
+          C: 49152
+          J: 12288
+
+# Optional: Fusion opportunities
+# These are operations that could potentially be fused to reduce memory traffic
+fusion_candidates:
+  # V, K, Q projections could be fused since they all read from same I
+  - fuse: ["V[b, m, h, e] = I1[b, m, d] * WV[h, e, d]",
+           "K[b, m, h, e] = I1[b, m, d] * WK[h, e, d]",
+           "Q[b, m, h, e] = I1[b, m, d] * WQ[h, e, d]"]
+    reason: "All three read same input I, can share input fetch"
+    potential_speedup: "1.5-2x due to reduced memory traffic"
+
+  # QK and softmax could be fused
+  - fuse: ["QK[b, m, p, h] = Q1[b, m, h, e] * K1[b, M: p, h, e]",
+           "QK_softmax[b, m, p, h] = QK1[b, m, p, h]"]
+    reason: "Avoid writing QK to memory, apply softmax immediately"
+    potential_speedup: "1.2-1.5x due to avoiding QK write/read"
+
+  # Softmax and AV could be fused
+  - fuse: ["QK_softmax[b, m, p, h] = QK1[b, m, p, h]",
+           "AV[b, m, h, f] = QK_softmax1[b, m, p, h] * V1[b, M: p, h, E: f]"]
+    reason: "Avoid writing softmax output, use directly in AV computation"
+    potential_speedup: "1.2-1.5x due to avoiding softmax write/read"
+
+  # FFA and FFB could be fused
+  - fuse: ["FFA[b, m, c] = Z1[b, m, g] * WFFA[g, c]",
+           "FFB[b, m, j] = FFA1[b, m, c] * WFFB[c, j]"]
+    reason: "Avoid writing large FFA intermediate (49152 dim)"
+    potential_speedup: "1.3-1.8x due to reduced memory for large FFN"
+
+# Notes on optimization strategies
+optimization_notes:
+  memory_bottleneck: |
+    The QK attention matrix [B, M, P, H] = [1, 8192, 8192, 96] is the largest
+    intermediate (24 GB in fp16). This doesn't fit in LocalBuffer (4 MB) or
+    even GlobalBuffer (128 MB), so it must be computed in tiles.
+
+  spatial_parallelism: |
+    TPU v4i has 4 spatial tiles. Best strategy:
+    - Split heads (H=96) → 24 heads per tile
+    - Or split tokens (M=8192) → 2048 tokens per tile
+    - Current mapping uses head splitting for most ops
+
+  data_reuse: |
+    Key reuse opportunities:
+    1. I is reused by V, K, Q projections
+    2. Q and K are reused across attention heads
+    3. Weights (WV, WK, WQ, etc.) are reused across all tokens
+
+    Keep weights in LocalBuffer (4 MB per tile) and stream activations.
+
+  suggested_experiments: |
+    1. Try fusing V/K/Q projections to reduce I traffic
+    2. Try different spatial splits (heads vs tokens)
+    3. Try different tiling sizes for QK attention
+    4. Measure impact of LocalBuffer vs GlobalBuffer for weights

@@ -1,0 +1,308 @@
+# GPT-3 Baseline Mapping (No Fusion - PyTorch Strategy)
+#
+# This mapping represents what PyTorch/TorchInductor does:
+# - All 9 operations are separate (V, K, Q, QK, Softmax, AV, Z, FFA, FFB)
+# - No fusion between operations
+# - Each operation reads inputs from GlobalBuffer independently
+# - Matches the behavior observed in TorchInductor analysis
+#
+# Use this as baseline to compare against fused versions
+#
+# Note: Spatial distribution across 4 TPU tiles (Z dimension) is handled
+# automatically by the architecture definition - no need for explicit Spatial nodes
+
+mapping:
+  nodes:
+    # Root storage - all tensors start in main memory
+    - !Storage
+      tensors: [I, WV, WK, WQ, V, K, Q, QK, QK_soft, AV, WZ, Z, WFFA, FFA, WFFB, FFB]
+      component: MainMemory
+
+    # Batch dimension (b=1 for inference)
+    - !Temporal
+      rank_variable: b
+      tile_shape: 1
+
+    # Move active tensors to GlobalBuffer
+    - !Storage
+      tensors: [I, WV, WK, WQ, V, K, Q, QK, QK_soft, AV, WZ, Z, WFFA, FFA, WFFB, FFB]
+      component: GlobalBuffer
+
+    # Sequential execution of all 9 operations
+    - !Sequential
+      nodes:
+        # ===== V Projection =====
+        # V[b,m,h,e] = I[b,m,d] * WV[h,e,d]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [I, WV, V]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32  # Tile sequence length
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24  # 96 heads / 4 tiles
+
+            - !Temporal
+              rank_variable: e
+              tile_shape: 128
+
+            - !Temporal
+              rank_variable: d
+              tile_shape: 384
+
+            - !Compute
+              einsum: V
+              component: MAC
+
+        # ===== K Projection =====
+        # K[b,m,h,e] = I[b,m,d] * WK[h,e,d]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [I, WK, K]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24
+
+            - !Spatial
+              rank_variable: h
+              tile_shape: 4
+              component: MAC
+              name: Z
+
+            - !Temporal
+              rank_variable: e
+              tile_shape: 128
+
+            - !Temporal
+              rank_variable: d
+              tile_shape: 384
+
+            - !Compute
+              einsum: K
+              component: MAC
+
+        # ===== Q Projection =====
+        # Q[b,m,h,e] = I[b,m,d] * WQ[h,e,d]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [I, WQ, Q]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24
+
+            - !Spatial
+              rank_variable: h
+              tile_shape: 4
+              component: MAC
+              name: Z
+
+            - !Temporal
+              rank_variable: e
+              tile_shape: 128
+
+            - !Temporal
+              rank_variable: d
+              tile_shape: 384
+
+            - !Compute
+              einsum: Q
+              component: MAC
+
+        # ===== QK Attention Scores =====
+        # QK[b,m,p,h] = Q[b,m,h,e] * K[b,p,h,e]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [Q, K, QK]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: p
+              tile_shape: 32  # Tile attention dim
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24
+
+            - !Spatial
+              rank_variable: h
+              tile_shape: 4
+              component: MAC
+              name: Z
+
+            - !Temporal
+              rank_variable: e
+              tile_shape: 128
+
+            - !Compute
+              einsum: QK
+              component: MAC
+
+        # ===== Softmax =====
+        # QK_soft[b,m,p,h] = softmax(QK[b,m,p,h])
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [QK, QK_soft]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: p
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24
+
+            - !Spatial
+              rank_variable: h
+              tile_shape: 4
+              component: MAC
+              name: Z
+
+            - !Compute
+              einsum: Softmax
+              component: MAC
+
+        # ===== AV Attention Output =====
+        # AV[b,m,h,e] = QK_soft[b,m,p,h] * V[b,p,h,e]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [QK_soft, V, AV]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: p
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24
+
+            - !Spatial
+              rank_variable: h
+              tile_shape: 4
+              component: MAC
+              name: Z
+
+            - !Temporal
+              rank_variable: e
+              tile_shape: 128
+
+            - !Compute
+              einsum: AV
+              component: MAC
+
+        # ===== Z Output Projection =====
+        # Z[b,m,g] = AV[b,m,h,e] * WZ[h,e,g]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [AV, WZ, Z]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: h
+              tile_shape: 24
+
+            - !Spatial
+              rank_variable: h
+              tile_shape: 4
+              component: MAC
+              name: Z
+
+            - !Temporal
+              rank_variable: e
+              tile_shape: 128
+
+            - !Temporal
+              rank_variable: g
+              tile_shape: 384
+
+            - !Compute
+              einsum: Z
+              component: MAC
+
+        # ===== FFA Feedforward A =====
+        # FFA[b,m,c] = Z[b,m,g] * WFFA[g,c]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [Z, WFFA, FFA]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: g
+              tile_shape: 384
+
+            - !Temporal
+              rank_variable: c
+              tile_shape: 1024  # Large intermediate dim
+
+            - !Compute
+              einsum: FFA
+              component: MAC
+
+        # ===== FFB Feedforward B =====
+        # FFB[b,m,j] = FFA[b,m,c] * WFFB[c,j]
+        - !Nested
+          nodes:
+            - !Storage
+              tensors: [FFA, WFFB, FFB]
+              component: LocalBuffer
+
+            - !Temporal
+              rank_variable: m
+              tile_shape: 32
+
+            - !Temporal
+              rank_variable: c
+              tile_shape: 1024
+
+            - !Temporal
+              rank_variable: j
+              tile_shape: 384
+
+            - !Compute
+              einsum: FFB
+              component: MAC
