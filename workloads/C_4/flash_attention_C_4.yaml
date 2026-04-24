@@ -1,0 +1,121 @@
+# =============================================================================
+# Simplified FlashAttention Pipeline - Condensed Scalar Ops
+# 4-stage pipeline per chunk: MXU → ScalarUnit → MXU → VPU
+# Minimal scalar operations (max 4 per chunk)
+# =============================================================================
+
+workload:
+  rank_sizes:
+    {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
+    {% set N_TOKENS = N_TOKENS | default(8192) %}
+    {% set N_NEW_TOKENS = N_NEW_TOKENS | default(1) %}
+
+    B: {{BATCH_SIZE}}
+    M: {{N_NEW_TOKENS}}
+    M_FULL: {{N_TOKENS}}
+    M_CHUNK: 2048
+    H: 96
+    E: 128
+    D: 96*128
+
+  bits_per_value: {All: 8}
+  persistent_tensors: weight - Intermediates
+
+  einsums:
+    # =========================================================================
+    # CHUNK 0: Tokens 0-63
+    # =========================================================================
+
+    # Stage 1 (MXU): Compute attention scores Q @ K_0^T
+    - einsum: "QK_0[b, m, m_chunk, h] = Q[b, m, h, e] * K_0[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Stage 2 (ScalarUnit): Condensed softmax (4 ops total)
+    - "max_0[b, m, h] = QK_0[b, m, M_CHUNK: m_chunk, h]"  # 1. max reduction
+    - "exp_0[b, m, m_chunk, h] = QK_0[b, m, m_chunk, h]"  # 2. exp(QK - max)
+    - "sum_0[b, m, h] = exp_0[b, m, M_CHUNK: m_chunk, h]"  # 3. sum reduction
+    - "softmax_0[b, m, m_chunk, h] = exp_0[b, m, m_chunk, h]"  # 4. divide by sum
+
+    # Stage 3 (MXU): Apply attention to values
+    - einsum: "AV_0[b, m, h, e] = softmax_0[b, m, m_chunk, h] * V_0[b, m_chunk, h, e]"
+      renames: {input: softmax_0}
+
+    # No separate initialization - chunk 1 will start the accumulation
+
+    # =========================================================================
+    # CHUNK 1: Tokens 64-127
+    # =========================================================================
+
+    # Stage 1 (MXU)
+    - einsum: "QK_1[b, m, m_chunk, h] = Q[b, m, h, e] * K_1[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Stage 2 (ScalarUnit): Condensed softmax (4 ops - same as chunk 0)
+    - "max_1[b, m, h] = QK_1[b, m, M_CHUNK: m_chunk, h]"
+    - "exp_1[b, m, m_chunk, h] = QK_1[b, m, m_chunk, h]"
+    - "sum_1[b, m, h] = exp_1[b, m, M_CHUNK: m_chunk, h]"
+    - "softmax_1[b, m, m_chunk, h] = exp_1[b, m, m_chunk, h]"
+
+    # Stage 3 (MXU)
+    - einsum: "AV_1[b, m, h, e] = softmax_1[b, m, m_chunk, h] * V_1[b, m_chunk, h, e]"
+      renames: {input: softmax_1}
+
+    # Stage 4 (VPU): Start accumulation (1 op)
+    - einsum: "AV_accum_1[b, m, h, e] = AV_0[b, m, h, e] + AV_1[b, m, h, e]"
+      renames: {input: AV_0}
+
+    # =========================================================================
+    # CHUNK 2: Tokens 128-191
+    # =========================================================================
+
+    # Stage 1 (MXU)
+    - einsum: "QK_2[b, m, m_chunk, h] = Q[b, m, h, e] * K_2[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Stage 2 (ScalarUnit): 4 ops
+    - "max_2[b, m, h] = QK_2[b, m, M_CHUNK: m_chunk, h]"
+    - "exp_2[b, m, m_chunk, h] = QK_2[b, m, m_chunk, h]"
+    - "sum_2[b, m, h] = exp_2[b, m, M_CHUNK: m_chunk, h]"
+    - "softmax_2[b, m, m_chunk, h] = exp_2[b, m, m_chunk, h]"
+
+    # Stage 3 (MXU)
+    - einsum: "AV_2[b, m, h, e] = softmax_2[b, m, m_chunk, h] * V_2[b, m_chunk, h, e]"
+      renames: {input: softmax_2}
+
+    # Stage 4 (VPU): 1 op
+    - einsum: "AV_accum_2[b, m, h, e] = AV_accum_1[b, m, h, e] + AV_2[b, m, h, e]"
+      renames: {input: AV_accum_1}
+
+    # =========================================================================
+    # CHUNK 3: Tokens 192-255
+    # =========================================================================
+
+    # Stage 1 (MXU)
+    - einsum: "QK_3[b, m, m_chunk, h] = Q[b, m, h, e] * K_3[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Stage 2 (ScalarUnit): 4 ops
+    - "max_3[b, m, h] = QK_3[b, m, M_CHUNK: m_chunk, h]"
+    - "exp_3[b, m, m_chunk, h] = QK_3[b, m, m_chunk, h]"
+    - "sum_3[b, m, h] = exp_3[b, m, M_CHUNK: m_chunk, h]"
+    - "softmax_3[b, m, m_chunk, h] = exp_3[b, m, m_chunk, h]"
+
+    # Stage 3 (MXU)
+    - einsum: "AV_3[b, m, h, e] = softmax_3[b, m, m_chunk, h] * V_3[b, m_chunk, h, e]"
+      renames: {input: softmax_3}
+
+    # Stage 4 (VPU): Final accumulation (1 op)
+    - einsum: "Output[b, m, h, e] = AV_accum_2[b, m, h, e] + AV_3[b, m, h, e]"
+      renames: {input: AV_accum_2}
+
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)
