@@ -1,0 +1,228 @@
+# =============================================================================
+# FlashAttention - Chunked Attention with Online Softmax Renormalization
+# Chunks over m_full (sequence dimension) to enable pipelining
+# Based on FlashAttention algorithm: https://arxiv.org/abs/2205.14135
+# =============================================================================
+
+workload:
+  # ===========================================================================
+  # Dimension Parameters
+  # ===========================================================================
+  rank_sizes:
+    {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
+    {% set N_TOKENS = N_TOKENS | default(256) %}
+    {% set N_NEW_TOKENS = N_NEW_TOKENS | default(1) %}
+    {% set CHUNK_SIZE = CHUNK_SIZE | default(64) %}
+
+    B: {{BATCH_SIZE}}           # Batch size
+    M: {{N_NEW_TOKENS}}          # Query tokens (1 in decode)
+    M_FULL: {{N_TOKENS}}         # Total KV cache tokens
+    M_CHUNK: {{CHUNK_SIZE}}      # Chunk size for KV
+
+    H: 96                        # Number of attention heads
+    E: 128                       # Head dimension
+    D: 96*128                    # Model dimension (h * e)
+
+  bits_per_value: {All: 8}
+  persistent_tensors: weight - Intermediates
+
+  # ===========================================================================
+  # FlashAttention Algorithm (4 chunks of 64 tokens each)
+  # ===========================================================================
+  einsums:
+    # =========================================================================
+    # CHUNK 0: Tokens 0-63
+    # =========================================================================
+
+    # MXU
+    # Step 1: Compute attention scores for chunk 0
+    - einsum: "QK_0[b, m, m_chunk, h] = Q[b, m, h, e] * K_0[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Scalar
+    # Step 2: Compute local max for numerical stability (reduction over m_chunk)
+    # In practice this would be: max_0[b,m,h] = max(QK_0[b,m,:,h], dim=m_chunk)
+    # For AccelForge, we approximate as identity (assuming stable numerics)
+    - einsum: "max_0[b, m, h] = QK_0[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: QK_0}
+
+    # Scalar
+    # Step 3: Compute exp(QK - max) for chunk 0
+    # Approximated as: exp_QK_0[b,m,m_chunk,h] = exp(QK_0 - max_0)
+    # In AccelForge we model this as element-wise operation
+    - einsum: "exp_QK_0[b, m, m_chunk, h] = QK_0[b, m, m_chunk, h]"
+      renames: {input: QK_0}
+
+    # Scalar
+    # Step 4: Compute local sum for chunk 0 (reduction over m_chunk)
+    # sum_0[b,m,h] = sum(exp_QK_0[b,m,:,h], dim=m_chunk)
+    - einsum: "sum_0[b, m, h] = exp_QK_0[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: exp_QK_0}
+
+    # Scalar
+    # Step 5: Compute local softmax (exp_QK / sum)
+    # We model this as element-wise operation
+    - einsum: "attn_0[b, m, m_chunk, h] = exp_QK_0[b, m, m_chunk, h]"
+      renames: {input: exp_QK_0}
+
+    # MXU
+    # Step 6: Compute partial attention output for chunk 0
+    - einsum: "AV_partial_0[b, m, h, e] = attn_0[b, m, m_chunk, h] * V_0[b, m_chunk, h, e]"
+      renames: {input: attn_0}
+
+    # Mem
+    # Initialize running statistics
+    - einsum: "running_max[b, m, h] = max_0[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_sum[b, m, h] = sum_0[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_AV[b, m, h, e] = AV_partial_0[b, m, h, e]"
+      is_copy_operation: true
+
+    # =========================================================================
+    # CHUNK 1: Tokens 64-127
+    # =========================================================================
+
+    # MXU
+    # Step 1: Compute attention scores for chunk 1
+    - einsum: "QK_1[b, m, m_chunk, h] = Q[b, m, h, e] * K_1[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Scalar
+    # Step 2: Local max for chunk 1
+    - einsum: "max_1[b, m, h] = QK_1[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: QK_1}
+
+    # Step 3: Update global max
+    # new_max = max(running_max, max_1)
+    - einsum: "new_max_1[b, m, h] = running_max[b, m, h] + max_1[b, m, h]"
+      renames: {input: running_max}
+
+    # Step 4: Renormalization correction factors
+    # old_scale = exp(running_max - new_max)
+    # new_scale = exp(max_1 - new_max)
+    - einsum: "old_scale_1[b, m, h] = running_max[b, m, h]"
+      renames: {input: running_max}
+    - einsum: "new_scale_1[b, m, h] = max_1[b, m, h]"
+      renames: {input: max_1}
+
+    # Step 5: Compute exp for chunk 1
+    - einsum: "exp_QK_1[b, m, m_chunk, h] = QK_1[b, m, m_chunk, h]"
+      renames: {input: QK_1}
+
+    # Step 6: Local sum for chunk 1
+    - einsum: "sum_1[b, m, h] = exp_QK_1[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: exp_QK_1}
+
+    # Step 7: Update global sum with renormalization
+    # running_sum = old_scale * running_sum + new_scale * sum_1
+    - einsum: "new_sum_1[b, m, h] = running_sum[b, m, h] + sum_1[b, m, h]"
+      renames: {input: running_sum}
+
+    # Step 8: Local attention for chunk 1
+    - einsum: "attn_1[b, m, m_chunk, h] = exp_QK_1[b, m, m_chunk, h]"
+      renames: {input: exp_QK_1}
+
+    # Step 9: Partial AV for chunk 1
+    - einsum: "AV_partial_1[b, m, h, e] = attn_1[b, m, m_chunk, h] * V_1[b, m_chunk, h, e]"
+      renames: {input: attn_1}
+
+    # Step 10: Update running AV with renormalization
+    # running_AV = old_scale * running_AV + new_scale * AV_partial_1
+    - einsum: "new_AV_1[b, m, h, e] = running_AV[b, m, h, e] + AV_partial_1[b, m, h, e]"
+      renames: {input: running_AV}
+
+    # Update running statistics
+    - einsum: "running_max_1[b, m, h] = new_max_1[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_sum_1[b, m, h] = new_sum_1[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_AV_1[b, m, h, e] = new_AV_1[b, m, h, e]"
+      is_copy_operation: true
+
+    # =========================================================================
+    # CHUNK 2: Tokens 128-191
+    # =========================================================================
+
+    - einsum: "QK_2[b, m, m_chunk, h] = Q[b, m, h, e] * K_2[b, m_chunk, h, e]"
+      renames: {input: Q}
+    - einsum: "max_2[b, m, h] = QK_2[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: QK_2}
+    - einsum: "new_max_2[b, m, h] = running_max_1[b, m, h] + max_2[b, m, h]"
+      renames: {input: running_max_1}
+    - einsum: "old_scale_2[b, m, h] = running_max_1[b, m, h]"
+      renames: {input: running_max_1}
+    - einsum: "new_scale_2[b, m, h] = max_2[b, m, h]"
+      renames: {input: max_2}
+    - einsum: "exp_QK_2[b, m, m_chunk, h] = QK_2[b, m, m_chunk, h]"
+      renames: {input: QK_2}
+    - einsum: "sum_2[b, m, h] = exp_QK_2[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: exp_QK_2}
+    - einsum: "new_sum_2[b, m, h] = running_sum_1[b, m, h] + sum_2[b, m, h]"
+      renames: {input: running_sum_1}
+    - einsum: "attn_2[b, m, m_chunk, h] = exp_QK_2[b, m, m_chunk, h]"
+      renames: {input: exp_QK_2}
+    - einsum: "AV_partial_2[b, m, h, e] = attn_2[b, m, m_chunk, h] * V_2[b, m_chunk, h, e]"
+      renames: {input: attn_2}
+    - einsum: "new_AV_2[b, m, h, e] = running_AV_1[b, m, h, e] + AV_partial_2[b, m, h, e]"
+      renames: {input: running_AV_1}
+    - einsum: "running_max_2[b, m, h] = new_max_2[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_sum_2[b, m, h] = new_sum_2[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_AV_2[b, m, h, e] = new_AV_2[b, m, h, e]"
+      is_copy_operation: true
+
+    # =========================================================================
+    # CHUNK 3: Tokens 192-255
+    # =========================================================================
+
+    - einsum: "QK_3[b, m, m_chunk, h] = Q[b, m, h, e] * K_3[b, m_chunk, h, e]"
+      renames: {input: Q}
+    - einsum: "max_3[b, m, h] = QK_3[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: QK_3}
+    - einsum: "new_max_3[b, m, h] = running_max_2[b, m, h] + max_3[b, m, h]"
+      renames: {input: running_max_2}
+    - einsum: "old_scale_3[b, m, h] = running_max_2[b, m, h]"
+      renames: {input: running_max_2}
+    - einsum: "new_scale_3[b, m, h] = max_3[b, m, h]"
+      renames: {input: max_3}
+    - einsum: "exp_QK_3[b, m, m_chunk, h] = QK_3[b, m, m_chunk, h]"
+      renames: {input: QK_3}
+    - einsum: "sum_3[b, m, h] = exp_QK_3[b, m, M_CHUNK: m_chunk, h]"
+      renames: {input: exp_QK_3}
+    - einsum: "new_sum_3[b, m, h] = running_sum_2[b, m, h] + sum_3[b, m, h]"
+      renames: {input: running_sum_2}
+    - einsum: "attn_3[b, m, m_chunk, h] = exp_QK_3[b, m, m_chunk, h]"
+      renames: {input: exp_QK_3}
+    - einsum: "AV_partial_3[b, m, h, e] = attn_3[b, m, m_chunk, h] * V_3[b, m_chunk, h, e]"
+      renames: {input: attn_3}
+    - einsum: "new_AV_3[b, m, h, e] = running_AV_2[b, m, h, e] + AV_partial_3[b, m, h, e]"
+      renames: {input: running_AV_2}
+
+    # =========================================================================
+    # Final Normalization
+    # =========================================================================
+
+    # Divide accumulated AV by final sum to get proper attention output
+    # Output[b,m,h,e] = new_AV_3 / new_sum_3
+    # Modeled as element-wise operation
+    - einsum: "Output[b, m, h, e] = new_AV_3[b, m, h, e]"
+      renames: {input: new_AV_3}
+
+# =============================================================================
+# Renames - Maps tensor accesses to data sources
+# =============================================================================
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+      expected_count: 1
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)
+      expected_count: 1 if len(All) == 3 else 0

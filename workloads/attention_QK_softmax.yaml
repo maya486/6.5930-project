@@ -1,32 +1,29 @@
-# =============================================================================
-# Simplified FlashAttention Pipeline - Condensed Scalar Ops
-# 4-stage pipeline per chunk: MXU → ScalarUnit → MXU → VPU
-# Minimal scalar operations (max 4 per chunk)
-# =============================================================================
-
 workload:
   rank_sizes:
-  
     {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
     {% set N_TOKENS = N_TOKENS | default(8192) %}
-    {% set N_NEW_TOKENS = N_NEW_TOKENS | default(1) %}
+    {% set N_NEW_TOKENS = N_TOKENS | default(1) %}
     B: {{BATCH_SIZE}}
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
-    M_CHUNK: 2048
-    # H: 96
-    H: 128
+    H: 96
     E: 128
     F: 128
-
+    D: 96*128 # = e * h
+    C: 4*96*128
+    J: 96*128
+    G: 96*128
 
   bits_per_value: {All: 8}
   persistent_tensors: weight - Intermediates
 
   einsums:
-    # Stage 1 (MXU)
-    - einsum: "QK_1[b, m, m_chunk, h] = Q[b, m, h, e] * K_1[b, m_chunk, h, e]"
-      renames: {input: K_1}
+  # - einsum: "QK[b, m, m_full, h] = Q[b, m, h, e] * K[b, m_full, h, e]"
+  #   renames: {input: Q}
+  - "QK_softmax[b, m, m_full, h] = QK[b, m, m_full, h]"
+
+  # - einsum: "AV[b, m, h, f] = QK_softmax[b, m, m_full, h] * V[b, m_full, h, E: f]"
+  #   renames: {input: QK_softmax}
 
 renames:
   einsums:

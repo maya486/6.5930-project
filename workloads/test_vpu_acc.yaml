@@ -1,0 +1,28 @@
+# Test VPU accumulation with proper configuration
+
+workload:
+  rank_sizes:
+    B: 1
+    M: 1
+    H: 96
+    E: 128
+
+  bits_per_value: {All: 8}
+
+  einsums:
+    # Element-wise addition - both inputs are equal
+    - einsum: "AV_accum[b, m, h, e] = AV_0[b, m, h, e] + AV_1[b, m, h, e]"
+
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+      # No expected_count - allow multiple inputs
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)
+      # No expected_count

@@ -1,0 +1,69 @@
+workload:
+  rank_sizes:
+    {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
+    {% set N_TOKENS = N_TOKENS | default(8192) %}
+    {% set N_NEW_TOKENS = N_TOKENS | default(1) %}
+    {% set CHUNK_SIZE = CHUNK_SIZE | default(64) %}
+    B: {{BATCH_SIZE}}
+    M: {{N_NEW_TOKENS}}
+    M_FULL: {{N_TOKENS}}
+    M_CHUNK: {{CHUNK_SIZE}}
+    H: 96
+    E: 128
+    F: 128
+    D: 96*128 # = e * h
+    C: 4*96*128
+    J: 96*128
+    G: 96*128
+
+  bits_per_value: {All: 8}
+  persistent_tensors: weight - Intermediates
+
+  einsums:
+  # - einsum: "QK[b, m, m_full, h] = Q[b, m, h, e] * K[b, m_full, h, e]"
+  #   renames: {input: Q}
+  # - "QK_softmax[b, m, m_full, h] = QK[b, m, m_full, h]"
+  # - einsum: "AV[b, m, h, f] = QK_softmax[b, m, m_full, h] * V[b, m_full, h, E: f]"
+  #   renames: {input: QK_softmax}
+  # - einsum: "Output[b, m, d] = AV[b, m, h, f] * W_out[h, f, d]"
+  #   renames: {input: AV}
+# Stage 1 (MXU)
+    - einsum: "QK_2[b, m, m_chunk, h] = Q[b, m, h, e] * K_2[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Stage 2 (ScalarUnit)
+    - "max_2[b, m, h] = QK_2[b, m, M_CHUNK: m_chunk, h]"
+    - "new_max_2[b, m, h] = running_max_1[b, m, h] + max_2[b, m, h]"
+    - "old_scale_2[b, m, h] = running_max_1[b, m, h]"
+    - "new_scale_2[b, m, h] = max_2[b, m, h]"
+    - "exp_2[b, m, m_chunk, h] = QK_2[b, m, m_chunk, h]"
+    - "sum_2[b, m, h] = exp_2[b, m, M_CHUNK: m_chunk, h]"
+    - "updated_sum_2[b, m, h] = running_sum_1[b, m, h] + sum_2[b, m, h]"
+    - "softmax_2[b, m, m_chunk, h] = exp_2[b, m, m_chunk, h]"
+    - einsum: "running_max_2[b, m, h] = new_max_2[b, m, h]"
+      is_copy_operation: true
+    - einsum: "running_sum_2[b, m, h] = updated_sum_2[b, m, h]"
+      is_copy_operation: true
+
+    # Stage 3 (MXU)
+    - einsum: "AV_2[b, m, h, e] = softmax_2[b, m, m_chunk, h] * V_2[b, m_chunk, h, e]"
+      renames: {input: softmax_2}
+
+    # Stage 4 (VPU)
+    - "AV_scaled_2[b, m, h, e] = AV_accum_1[b, m, h, e]"
+    - einsum: "AV_accum_2[b, m, h, e] = AV_scaled_2[b, m, h, e] + AV_2[b, m, h, e]"
+      renames: {input: AV_scaled_2}
+
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+      expected_count: 1
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)
+      expected_count: 1 if len(All) == 3 else 0

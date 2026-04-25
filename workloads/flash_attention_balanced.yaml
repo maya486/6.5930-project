@@ -1,0 +1,123 @@
+# =============================================================================
+# Balanced FlashAttention Pipeline
+# Dimensions tuned for even distribution across MXU, ScalarUnit, VPU
+# 4-stage pipeline per chunk: MXU → ScalarUnit → MXU → VPU
+# =============================================================================
+
+workload:
+  rank_sizes:
+    {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
+    {% set N_TOKENS = N_TOKENS | default(2048) %}  # Reduced from 8192
+    {% set N_NEW_TOKENS = N_NEW_TOKENS | default(1) %}
+    {% set CHUNK_SIZE = CHUNK_SIZE | default(256) %}  # Reduced from 2048
+
+    B: {{BATCH_SIZE}}
+    M: {{N_NEW_TOKENS}}
+    M_FULL: {{N_TOKENS}}
+    M_CHUNK: {{CHUNK_SIZE}}
+    H: 32              # Reduced from 96 (3× smaller)
+    E: 64              # Reduced from 128 (2× smaller)
+    D: 32*64           # 2048
+
+  bits_per_value: {All: 8}
+  persistent_tensors: weight - Intermediates
+
+  einsums:
+    # =========================================================================
+    # CHUNK 0: Tokens 0-255
+    # =========================================================================
+
+    # Stage 1 (MXU): Compute attention scores Q @ K_0^T
+    - einsum: "QK_0[b, m, m_chunk, h] = Q[b, m, h, e] * K_0[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    # Stage 2 (ScalarUnit): Enhanced softmax (6 ops for more work)
+    - "max_0[b, m, h] = QK_0[b, m, M_CHUNK: m_chunk, h]"  # max reduction
+    - "centered_0[b, m, m_chunk, h] = QK_0[b, m, m_chunk, h]"  # QK - max
+    - "exp_0[b, m, m_chunk, h] = centered_0[b, m, m_chunk, h]"  # exp
+    - "sum_0[b, m, h] = exp_0[b, m, M_CHUNK: m_chunk, h]"  # sum reduction
+    - "inv_sum_0[b, m, h] = sum_0[b, m, h]"  # 1/sum
+    - "softmax_0[b, m, m_chunk, h] = exp_0[b, m, m_chunk, h]"  # exp / sum
+
+    # Stage 3 (MXU): Apply attention to values
+    - einsum: "AV_0[b, m, h, e] = softmax_0[b, m, m_chunk, h] * V_0[b, m_chunk, h, e]"
+      renames: {input: softmax_0}
+
+    # =========================================================================
+    # CHUNK 1: Tokens 256-511
+    # =========================================================================
+
+    - einsum: "QK_1[b, m, m_chunk, h] = Q[b, m, h, e] * K_1[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    - "max_1[b, m, h] = QK_1[b, m, M_CHUNK: m_chunk, h]"
+    - "centered_1[b, m, m_chunk, h] = QK_1[b, m, m_chunk, h]"
+    - "exp_1[b, m, m_chunk, h] = centered_1[b, m, m_chunk, h]"
+    - "sum_1[b, m, h] = exp_1[b, m, M_CHUNK: m_chunk, h]"
+    - "inv_sum_1[b, m, h] = sum_1[b, m, h]"
+    - "softmax_1[b, m, m_chunk, h] = exp_1[b, m, m_chunk, h]"
+
+    - einsum: "AV_1[b, m, h, e] = softmax_1[b, m, m_chunk, h] * V_1[b, m_chunk, h, e]"
+      renames: {input: softmax_1}
+
+    # Stage 4 (VPU): Enhanced accumulation (3 ops)
+    - "weighted_0[b, m, h, e] = AV_0[b, m, h, e]"  # apply weight
+    - "weighted_1[b, m, h, e] = AV_1[b, m, h, e]"  # apply weight
+    - einsum: "AV_accum_1[b, m, h, e] = weighted_0[b, m, h, e] + weighted_1[b, m, h, e]"
+      renames: {input: weighted_0}
+
+    # =========================================================================
+    # CHUNK 2: Tokens 512-767
+    # =========================================================================
+
+    - einsum: "QK_2[b, m, m_chunk, h] = Q[b, m, h, e] * K_2[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    - "max_2[b, m, h] = QK_2[b, m, M_CHUNK: m_chunk, h]"
+    - "centered_2[b, m, m_chunk, h] = QK_2[b, m, m_chunk, h]"
+    - "exp_2[b, m, m_chunk, h] = centered_2[b, m, m_chunk, h]"
+    - "sum_2[b, m, h] = exp_2[b, m, M_CHUNK: m_chunk, h]"
+    - "inv_sum_2[b, m, h] = sum_2[b, m, h]"
+    - "softmax_2[b, m, m_chunk, h] = exp_2[b, m, m_chunk, h]"
+
+    - einsum: "AV_2[b, m, h, e] = softmax_2[b, m, m_chunk, h] * V_2[b, m_chunk, h, e]"
+      renames: {input: softmax_2}
+
+    - "weighted_1_2[b, m, h, e] = AV_accum_1[b, m, h, e]"
+    - "weighted_2[b, m, h, e] = AV_2[b, m, h, e]"
+    - einsum: "AV_accum_2[b, m, h, e] = weighted_1_2[b, m, h, e] + weighted_2[b, m, h, e]"
+      renames: {input: weighted_1_2}
+
+    # =========================================================================
+    # CHUNK 3: Tokens 768-1023
+    # =========================================================================
+
+    - einsum: "QK_3[b, m, m_chunk, h] = Q[b, m, h, e] * K_3[b, m_chunk, h, e]"
+      renames: {input: Q}
+
+    - "max_3[b, m, h] = QK_3[b, m, M_CHUNK: m_chunk, h]"
+    - "centered_3[b, m, m_chunk, h] = QK_3[b, m, m_chunk, h]"
+    - "exp_3[b, m, m_chunk, h] = centered_3[b, m, m_chunk, h]"
+    - "sum_3[b, m, h] = exp_3[b, m, M_CHUNK: m_chunk, h]"
+    - "inv_sum_3[b, m, h] = sum_3[b, m, h]"
+    - "softmax_3[b, m, m_chunk, h] = exp_3[b, m, m_chunk, h]"
+
+    - einsum: "AV_3[b, m, h, e] = softmax_3[b, m, m_chunk, h] * V_3[b, m_chunk, h, e]"
+      renames: {input: softmax_3}
+
+    - "weighted_2_3[b, m, h, e] = AV_accum_2[b, m, h, e]"
+    - "weighted_3[b, m, h, e] = AV_3[b, m, h, e]"
+    - einsum: "Output[b, m, h, e] = weighted_2_3[b, m, h, e] + weighted_3[b, m, h, e]"
+      renames: {input: weighted_2_3}
+
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)

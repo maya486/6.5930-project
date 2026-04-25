@@ -16,15 +16,13 @@ workload:
     M_CHUNK: 2048
     H: 96
     E: 128
-    D: 96*128
 
   bits_per_value: {All: 8}
-  persistent_tensors: weight - Intermediates
+  # persistent_tensors: weight - Intermediates
 
   einsums:
     # Stage 4 (VPU): Start accumulation (1 op)
     - einsum: "AV_accum_1[b, m, h, e] = AV_0[b, m, h, e] + AV_1[b, m, h, e]"
-      renames: {input: AV_0}
 
 renames:
   einsums:
@@ -32,8 +30,7 @@ renames:
     tensor_accesses:
     - name: input
       source: Inputs & Intermediates if len(All) == 3 else Inputs
+      # expected_count: 2
     - name: output
       source: Outputs
       expected_count: 1
-    - name: weight
-      source: ~(input | output)
