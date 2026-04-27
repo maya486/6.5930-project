@@ -1,0 +1,41 @@
+# =============================================================================
+# Simplified FlashAttention Pipeline - Condensed Scalar Ops
+# 4-stage pipeline per chunk: MXU → ScalarUnit → MXU → VPU
+# Minimal scalar operations (max 4 per chunk)
+# =============================================================================
+
+workload:
+  rank_sizes:
+    {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
+    {% set N_TOKENS = N_TOKENS | default(8192) %}
+    {% set N_NEW_TOKENS = N_NEW_TOKENS | default(1) %}
+
+    B: {{BATCH_SIZE}}
+    M: {{N_NEW_TOKENS}}
+    M_FULL: {{N_TOKENS}}
+    M_CHUNK: {{N_TOKENS // 2}}
+    H: 96
+    E: 128
+
+  bits_per_value: {All: 8}
+  persistent_tensors: weight - Intermediates
+  
+  einsums:
+    # Stage 3 (MXU): Apply attention to values
+    - einsum: "AV_0[b, m, h, e] = softmax_0[b, m, m_chunk, h] * V_0[b, m_chunk, h, e]"
+      renames: {input: V_0}
+
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+      expected_count: 1
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)
+      expected_count: 1 if len(All) == 3 else 0
+

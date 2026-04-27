@@ -1,0 +1,60 @@
+workload:
+  rank_sizes:
+    {% set BATCH_SIZE = BATCH_SIZE | default(1) %}
+    {% set N_TOKENS = N_TOKENS | default(1024) %}
+    {% set N_NEW_TOKENS = N_TOKENS | default(1) %}
+    {% set CHUNK_SIZE = 8 %}
+    B: {{BATCH_SIZE}}
+    M: {{N_NEW_TOKENS}}
+    M_FULL_CHUNK: {{N_TOKENS // CHUNK_SIZE}}  # = N_TOKENS / CHUNK_SIZE
+    P: {{CHUNK_SIZE}}                          # number of pipeline chunks
+    H: 8
+    E: 128
+    F: 128
+    D: 8*128 # = e * h
+    C: 4*8*128
+    J: 8*128
+    G: 8*128
+
+  bits_per_value: {All: 8}
+  persistent_tensors: weight - Intermediates
+
+  einsums:
+  - {einsum: "I[b, m, d] = I_in[b, m, d]", is_copy_operation: True}
+
+  # V and K containing the new tokens only.
+  - "V_new[b, m, h, e] = I[b, m, d] * WV[h, e, d]"
+  - "K_new[b, m, h, e] = I[b, m, d] * WK[h, e, d]"
+
+  # Q containing the new tokens only.
+  - "Q_new[b, m, h, e] = I[b, m, d] * WQ[h, e, d]"
+
+  # Calculate how the new queries attend to one chunk of K.
+  # K and V are accessed in chunks of size M_FULL_CHUNK (one chunk per pipeline stage).
+  - einsum: "QK_chunk[b, m, p, m_full_chunk, h] = Q_new[b, m, h, e] * K[b, p, m_full_chunk, h, e]"
+    renames: {input: Q_new}
+  - "QK_softmax_chunk[b, m, p, m_full_chunk, h] = QK_chunk[b, m, p, m_full_chunk, h]"
+
+  - einsum: "AV_chunk[b, m, p, h, f] = QK_softmax_chunk[b, m, p, m_full_chunk, h] * V[b, p, m_full_chunk, h, E: f]"
+    renames: {input: QK_softmax_chunk}
+
+  # Accumulation phase: sum partial AV results across all pipeline chunks.
+  - "AV[b, m, h, f] = AV_chunk[b, m, p, h, f]"
+
+  - "Z[b, m, g] = AV[b, m, h, f] * WZ[h, f, g]"
+  - "FFA[b, m, c] = Z[b, m, g] * WFFA[g, c]"
+  - "FFB[b, m, j] = FFA[b, m, c] * WFFB[c, j]"
+
+renames:
+  einsums:
+  - name: default
+    tensor_accesses:
+    - name: input
+      source: Inputs & Intermediates if len(All) == 3 else Inputs
+      expected_count: 1
+    - name: output
+      source: Outputs
+      expected_count: 1
+    - name: weight
+      source: ~(input | output)
+      expected_count: 1 if len(All) == 3 else 0
