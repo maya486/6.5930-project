@@ -14,7 +14,7 @@ workload:
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
     M_CHUNK: 512
-    H: 96
+    H: 128
     E: 128
 
   bits_per_value: {All: 8}

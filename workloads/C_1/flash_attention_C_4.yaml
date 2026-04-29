@@ -13,7 +13,7 @@ workload:
     B: {{BATCH_SIZE}}
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
-    M_CHUNK: 512
+    M_CHUNK: 8192
     H: 128
     E: 128
     D: 96*128
@@ -22,11 +22,14 @@ workload:
   persistent_tensors: weight - Intermediates
 
   einsums:
-    # Stage 2 (ScalarUnit): Condensed softmax (4 ops - same as chunk 0)
+    - einsum: "QK_1[b, m, m_chunk, h] = Q[b, m, h, e] * K_1[b, m_chunk, h, e]"
+      renames: {input: K_1}
     - "max_1[b, m, h] = QK_1[b, m, M_CHUNK: m_chunk, h]"
     - "exp_1[b, m, m_chunk, h] = QK_1[b, m, m_chunk, h]"
     - "sum_1[b, m, h] = exp_1[b, m, M_CHUNK: m_chunk, h]"
     - "softmax_1[b, m, m_chunk, h] = exp_1[b, m, m_chunk, h]"
+    - einsum: "AV_1[b, m, h, e] = softmax_1[b, m, m_chunk, h] * V_1[b, m_chunk, h, e]"
+      renames: {input: V_1}
 
 renames:
   einsums:

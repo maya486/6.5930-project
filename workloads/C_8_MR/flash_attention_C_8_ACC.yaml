@@ -13,20 +13,16 @@ workload:
     B: {{BATCH_SIZE}}
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
-    M_CHUNK: 512
+    M_CHUNK: 1024
     H: 128
     E: 128
-    D: 96*128
 
   bits_per_value: {All: 8}
-  persistent_tensors: weight - Intermediates
+  # persistent_tensors: weight - Intermediates
 
   einsums:
-    # Stage 2 (ScalarUnit): Condensed softmax (4 ops - same as chunk 0)
-    - "max_1[b, m, h] = QK_1[b, m, M_CHUNK: m_chunk, h]"
-    - "exp_1[b, m, m_chunk, h] = QK_1[b, m, m_chunk, h]"
-    - "sum_1[b, m, h] = exp_1[b, m, M_CHUNK: m_chunk, h]"
-    - "softmax_1[b, m, m_chunk, h] = exp_1[b, m, m_chunk, h]"
+    # Stage 4 (VPU): Start accumulation (1 op)
+    - einsum: "AV_accum_1[b, m, h, e] = AV_0[b, m, h, e] + AV_1[b, m, h, e]"
 
 renames:
   einsums:
@@ -34,8 +30,7 @@ renames:
     tensor_accesses:
     - name: input
       source: Inputs & Intermediates if len(All) == 3 else Inputs
+      # expected_count: 2
     - name: output
       source: Outputs
       expected_count: 1
-    - name: weight
-      source: ~(input | output)

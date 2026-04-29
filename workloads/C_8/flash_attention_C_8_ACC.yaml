@@ -14,14 +14,13 @@ workload:
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
     M_CHUNK: {{N_TOKENS // 8}}
-    H: 96
+    H: 128
     E: 128
 
   bits_per_value: {All: 8}
 
   einsums:
     - einsum: "Output[b, m, h, e] = AV_0[b, m, h, e] + AV_1[b, m, h, e]"
-      renames: {input: AV_0}
 
 renames:
   einsums:
