@@ -6,8 +6,8 @@ arch:
     leak_power: 0
     area: 0
     actions:
-    - {name: read, energy: 7.03e-12, latency: 1 / (8 * 307e9)}
-    - {name: write, energy: 7.03e-12, latency: 1 / (8 * 307e9)}
+    - {name: read, energy: 7.03e-12, latency: 1 / (8 * 614e9)}
+    - {name: write, energy: 7.03e-12, latency: 1 / (8 * 614e9)}
     # - {name: read, energy: 7.03e-12, latency: 0}
     # - {name: write, energy: 7.03e-12, latency: 0}
     tensors: {keep: ~Intermediates, may_keep: All}
@@ -19,8 +19,8 @@ arch:
     leak_power: 0
     area: 112e-6
     actions:
-    - {name: read, energy: 1.88e-12, latency: 1 / (8 * 1024e9)}
-    - {name: write, energy: 2.36e-12, latency: 1 / (8 * 512e9)}
+    - {name: read, energy: 1.88e-12, latency: 1 / (8 * 2048e9)}
+    - {name: write, energy: 2.36e-12, latency: 1 / (8 * 1024e9)}
     # - {name: read, energy: 1.88e-12, latency: 0}
     # - {name: write, energy: 2.36e-12, latency: 0}
     tensors: {keep: ~MainMemory.tensors, may_keep: All}
@@ -65,5 +65,5 @@ arch:
       leak_power: 0
       area: 8.5e-10/128 # MXU/128
       actions:
-      - {name: compute, energy: 0.32e-12, latency: 1 / 1.05e9}
+      - {name: compute, energy: 0.084e-12, latency: 1 / 0.525e9}
       enabled: len(All) == 3

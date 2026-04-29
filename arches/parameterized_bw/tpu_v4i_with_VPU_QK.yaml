@@ -6,8 +6,8 @@ arch:
     leak_power: 0
     area: 0
     actions:
-    - {name: read, energy: 7.03e-12, latency: 1 / (8 * 307e9)}
-    - {name: write, energy: 7.03e-12, latency: 1 / (8 * 307e9)}
+    - {name: read, energy: 7.03e-12, latency: 1 / ({{ BW_FACTOR }} * 8 * 614e9)}
+    - {name: write, energy: 7.03e-12, latency: 1 / ({{ BW_FACTOR }} * 8 * 614e9)}
     # - {name: read, energy: 7.03e-12, latency: 0}
     # - {name: write, energy: 7.03e-12, latency: 0}
     tensors: {keep: ~Intermediates, may_keep: All}
@@ -19,8 +19,8 @@ arch:
     leak_power: 0
     area: 112e-6
     actions:
-    - {name: read, energy: 1.88e-12, latency: 1 / (8 * 1024e9)}
-    - {name: write, energy: 2.36e-12, latency: 1 / (8 * 512e9)}
+    - {name: read, energy: 1.88e-12, latency: 1 / ({{ BW_FACTOR }} * 8 * 2048e9)}
+    - {name: write, energy: 2.36e-12, latency: 1 / ({{ BW_FACTOR }} * 8 * 1024e9)}
     # - {name: read, energy: 1.88e-12, latency: 0}
     # - {name: write, energy: 2.36e-12, latency: 0}
     tensors: {keep: ~MainMemory.tensors, may_keep: All}
@@ -49,10 +49,11 @@ arch:
   - !Fork
     nodes:
     - !Memory
-      name: VpuBuffer
+      name: MxuBuffer
       spatial:
-        - {name: reuse_input, fanout: 128, may_reuse: input, reuse: input, min_usage: 1}
-      size: 1024*1024*4 # WHAT SIZE?
+      - {name: reuse_weight1, fanout: 128, may_reuse: weight, reuse: weight, min_usage: 1}
+      - {name: reuse_weight2, fanout: 128, may_reuse: output, reuse: output, min_usage: 1}
+      size: 1024*1024*4*8 # WHAT SIZE?
       leak_power: 0
       area: 51e-6 # WHAT AREA?
       actions:
@@ -61,9 +62,31 @@ arch:
       tensors: {keep: input | output}
 
     - !Compute
-      name: VPU
+      name: MXU
       leak_power: 0
-      area: 8.5e-10/128 # MXU/128
+      area: 8.5e-10
       actions:
-      - {name: compute, energy: 0.32e-12, latency: 1 / 1.05e9}
+      - {name: compute, energy: 0.084e-12, latency: 1 / 1.05e9}
       enabled: len(All) == 3
+      
+  # - !Fork
+  #   nodes:
+  #   - !Memory
+  #     name: VpuBuffer
+  #     spatial:
+  #       - {name: reuse_weight, fanout: 128, may_reuse: weight, reuse: weight, min_usage: 1}
+  #     size: 1024*1024*4 # WHAT SIZE?
+  #     leak_power: 0
+  #     area: 51e-6 # WHAT AREA?
+  #     actions:
+  #     - {name: read, energy: 0.249e-12, latency: 0} # WHAT ENERGY?
+  #     - {name: write, energy: 0.293e-12, latency: 0} # WHAT ENERGY?
+  #     tensors: {keep: input | output}
+
+  #   - !Compute
+  #     name: VPU
+  #     leak_power: 0
+  #     area: 8.5e-10/128 # MXU/128
+  #     actions:
+  #     - {name: compute, energy: 0.32e-12, latency: 1 / 1.05e9}
+  #     enabled: len(All) == 3

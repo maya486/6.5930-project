@@ -6,8 +6,8 @@ arch:
     leak_power: 0
     area: 0
     actions:
-    - {name: read, energy: 7.03e-12, latency: 1 / (8 * 614e9)}
-    - {name: write, energy: 7.03e-12, latency: 1 / (8 * 614e9)}
+    - {name: read, energy: 7.03e-12, latency: 1 / (8 * 1228e9)}
+    - {name: write, energy: 7.03e-12, latency: 1 / (8 * 1228e9)}
     # - {name: read, energy: 7.03e-12, latency: 0}
     # - {name: write, energy: 7.03e-12, latency: 0}
     tensors: {keep: ~Intermediates, may_keep: All}
