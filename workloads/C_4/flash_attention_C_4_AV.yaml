@@ -14,7 +14,6 @@ workload:
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
     M_CHUNK: 2048
-    # H: 96
     H: 128
     E: 128
     F: 128

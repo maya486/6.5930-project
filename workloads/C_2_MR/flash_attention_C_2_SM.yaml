@@ -13,7 +13,7 @@ workload:
     B: {{BATCH_SIZE}}
     M: {{N_NEW_TOKENS}}
     M_FULL: {{N_TOKENS}}
-    M_CHUNK: 512
+    M_CHUNK: 4096
     H: 128
     E: 128
     D: 96*128
