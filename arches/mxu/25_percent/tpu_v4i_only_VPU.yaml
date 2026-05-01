@@ -65,5 +65,5 @@ arch:
       leak_power: 0
       area: 8.5e-10/128 # MXU/128
       actions:
-      - {name: compute, energy: 0.084e-12, latency: 1 / 0.2625e9}
+      - {name: compute, energy: 0.32e-12, latency: 1 / 0.2625e9}
       enabled: len(All) == 3
