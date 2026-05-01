@@ -43,7 +43,7 @@ arch:
       area: 8.7e-6
       leak_power: 0
       actions:
-      - {name: compute, energy: 1.2e-12, latency: 1 / 1.05e9}
+      - {name: compute, energy: 1.2e-12, latency: 1 / 2.1e9}
       enabled: len(All) == 2
       
   - !Fork
